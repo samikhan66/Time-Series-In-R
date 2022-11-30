@@ -1,0 +1,199 @@
+---
+title: "R Notebook Technical Interview with Welligence"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+############ PROBLEM 1 ################
+# Read csv
+data <- read.csv("/home/sami/Desktop/Welligence_Assignment/Interview/Interview/test.csv")
+
+```
+```{r}
+#Data Cleaning and Exploration
+# 1. 
+# Create series dataframe where the columns are well names and the rows are the date 
+library(reshape2)
+library(dplyr)
+# selecting only well names and period from the original dataframe
+df_series <- select(data, period, well_name)
+# casting the well name so that the rows become column names
+df_series <- dcast(df_series, period~well_name)
+# converting the period to date time format
+df_series <- df_series[order(as.Date(df_series$period, format="%Y/%m/%d")),]
+rownames(df_series) <- df_series$period
+df_series$period <- NULL
+df_series[!is.na(df_series)] <- 1
+df_series[is.na(df_series)] <- 0
+
+print(df_series)
+```
+
+```{r}
+#Data Cleaning and Exploration
+#2. 
+library(tidyr)
+library(lubridate)
+
+# Find out the gas_oil_ratio by gas_oil_ratio = gas_total/oil and decline_gas_rate = gas_total - lag(gas_total)
+well_data <- data %>%
+  dplyr::arrange(well_name, period) %>%
+  dplyr::mutate(period = as.Date(period),
+                gas_oil_ratio = gas_total/oil,
+                decline_gas_rate = gas_total - lag(gas_total)) %>%
+dplyr::group_by(well_name) %>%
+dplyr::summarize(min_date = min(period),
+         max_date = max(period),
+         months_produced = lubridate::interval(min_date, max_date) %/% months(1),
+         average_gas_oil_ratio = mean(gas_oil_ratio, na.rm=TRUE),
+         average_decline_gas_rate = mean(decline_gas_rate, na.rm=TRUE))
+print(well_data)
+
+```
+
+
+
+```{r}
+############ PROBLEM 2 ################
+#Forecasting
+# convert period to datetime and group by the well names
+date_df <- data %>%
+  dplyr::mutate(date=as.Date(period)) %>%
+  dplyr::group_by(well_name)
+
+#getting the minimum and maximum of each date by using min/max functions and calculating the total number of months
+month_df <- date_df %>%
+  dplyr::summarize(min_date=min(date), max_date=max(date),
+            months=length(seq(min_date, max_date, by="month"))-1)
+#getting the months and years in its respective formats and sorting the dataframe by well_name, year, and months respectively
+sorted_df <- date_df %>%
+  dplyr::mutate(months=as.numeric(format(date, "%m"))) %>%
+  dplyr::mutate(year=as.numeric(format(date, "%Y"))) %>%
+  dplyr::arrange(well_name,year, months)
+  
+```
+
+```{r}
+# Filter out wells with less than 24 months of production
+wells_less_than_24_months_of_production <- month_df %>%
+  dplyr::filter(months < 24, na.rm = TRUE)
+
+wells_remove_list <- wells_less_than_24_months_of_production["well_name"]
+sorted_df <- sorted_df[!sorted_df$well_name %in% wells_remove_list, ]
+
+# Group the oil dataframe by period and calculate the cumulative oil produced for each well
+oil_df <- sorted_df %>%
+  dplyr::group_by(period) %>%
+  dplyr::summarize(cum_oil=cumsum(oil))
+
+# In order to get rid of the period duplicates group by date and then calculate the sum of oil produced for each period
+time_df <- oil_df %>%
+  dplyr::mutate(date=as.Date(period)) %>%
+  dplyr::group_by(date) %>%
+  dplyr::summarize(oil=sum(cum_oil)) %>%
+  dplyr::arrange(date)
+
+```
+```{r}
+# Building a forecasting model 
+
+library(forecast)
+library(MLmetrics)
+library(TSstudio)
+library(tidyverse)
+library(xts)
+library(zoo)
+library(tsbox)
+
+# convert the oil produced per period to xts format
+data_ts_xts <- xts(time_df$oil, time_df$date)
+
+#Create train and validation set
+# Multiply by 0.987 since we are forecasting 6 months into the future
+train_date <- nrow(data_ts_xts) *0.987 
+test_date <- train_date + 1
+train <- ts_ts(data_ts_xts[1:train_date,])
+test <- ts_ts(data_ts_xts[test_date:nrow(data_ts_xts),])
+
+```
+
+```{r}
+
+# Trying with a classical algorithm (Exponential Smoothing)
+ets_model = ets(train, allow.multiplicative.trend = TRUE)
+# Getting the smoothing parameters of the ets model
+summary(ets_model)
+```
+```{r}
+# Finding out the MAPE (Mean absolute percentage error) for comparison with other algorithms
+ets_forecast = forecast(ets_model, h=length(test))
+MAPE(ets_forecast$mean, test) *100
+
+# MAPE comes out to be 10.55749%
+```
+```{r}
+
+#plot a line graph with the actual values 
+plot(data_ts,col="blue",xlab="Year", ylab="Cumulative Oil Production",main="ETS Forecast", type='l',lwd=1.5)
+#plot the predicted values
+lines(ets_forecast$mean,col="orange",lwd=1.5)
+#add a legend
+legend("topright",inset=.03,legend=c("actual", "predicted"),col=c("blue","orange"),lty=1:1,cex=0.8)
+
+
+```
+
+```{r}
+# Trying Neural Network
+
+#Train a neural network model
+neuralnet <- nnetar(train)
+#Generate forecasts with the model
+neuralnet.forecast <- forecast(neuralnet, h=length(test))
+#Check the MAPE
+MAPE(neuralnet.forecast$mean, test) * 100
+
+
+# MAPE came out to be 4.708204%
+```
+```{r}
+#plot a line graph with the actual values 
+plot(data_ts,col="blue",xlab="Year", ylab="Cumulative Oil Production",main="Neural Network Forecast", type='l',lwd=1.5)
+#plot the predicted values
+lines(neuralnet.forecast$mean,col="orange",lwd=1.5)
+#add a legend
+legend("topright",inset=.03,legend=c("actual", "predicted"),col=c("blue","orange"),lty=1:1,cex=0.8)
+```
+
+
+```{SQL}
+############ PROBLEM 3 ################
+
+# Given the below database schema, write SQL which outputs a table with the following columns
+SELECT
+  asset_name,
+  basin,
+  pdp_oil,
+  average_oil_production
+INTO
+ oil_by_asset_production
+FROM
+  assets
+  INNER JOIN (
+    SELECT
+      asset_id,
+      AVG(oil) AS average_oil_production GROUP_BY asset_id
+  ) average_production ON assets.id = average_production.asset_id
+  INNER JOIN asset_reserves ON assets.id = asset_reserves.asset_id
+  INNER JOIN basins ON assets.basin_id = basins.id ORDER_BY average_oil_production
+
+```
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
